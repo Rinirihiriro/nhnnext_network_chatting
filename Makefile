@@ -1,11 +1,12 @@
-# mimimal Makefile
+ODIR = bin
 
 all: server client
 
-CFLAGS = -g
+server : server.cpp
+	g++ -o $(ODIR)/$@ server.cpp
 
-server : server.c
-client : client.c
+client : client.cpp
+	g++ -o $(ODIR)/$@ client.cpp
 
 clean: 
-	rm server client
+	rm -f bin/*
