@@ -335,8 +335,8 @@ void main(const int argc, const char * const * const argv)
 		Recv(clientSocket);
 	}
 
+	CloseHandle(hCP);
 	closesocket(listenSocket);
-
 	WSACleanup();
 	DeleteCriticalSection(&globalCriticalSection);
 
