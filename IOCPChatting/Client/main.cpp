@@ -85,7 +85,7 @@ void main(const int argc, const char * const * const argv)
 
 	InitializeCriticalSection(&globalCriticalSection);
 
-	if (argc != 2)
+	if (argc != 3)
 	{
 #ifndef TEST
 		printf("USAGE : %s <IP> <PORT>", argv[0]);
@@ -272,8 +272,10 @@ void RecvThread(SOCKET sock)
 
 		PushChatLog(buf);
 	}
-	if (result == 0)
+	int error = WSAGetLastError();
+	if (result == 0 || error == WSAECONNRESET)
 		PushChatLog("** Server closed **");
+
 	chattingOver = true;
 }
 
