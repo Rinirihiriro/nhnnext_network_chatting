@@ -234,7 +234,6 @@ void main(const int argc, const char * const * const argv)
 
 	InitializeCriticalSection(&globalCriticalSection);
 
-	Log("Starting the server...");
 
 	if (argc != 2)
 	{
@@ -249,6 +248,8 @@ void main(const int argc, const char * const * const argv)
 	{
 		port = atoi(argv[1]);
 	}
+
+	Log("Starting the server...");
 
 	WSAData wsadata = { 0, };
 	if (WSAStartup(MAKEWORD(2, 2), &wsadata))
