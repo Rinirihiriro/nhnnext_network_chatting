@@ -79,9 +79,11 @@ void RecvThread(SOCKET sock);
 
 void main(const int argc, const char * const * const argv)
 {
-	int error;
 	unsigned short port;
 	const char* ip;
+
+	WSAData wsadata = { 0, };
+	sockaddr_in serverAddr = { 0, };
 
 	InitializeCriticalSection(&globalCriticalSection);
 
@@ -89,7 +91,7 @@ void main(const int argc, const char * const * const argv)
 	{
 #ifndef TEST
 		printf("USAGE : %s <IP> <PORT>", argv[0]);
-		return;
+		goto delcs;
 #else
 		port = 12345;
 		ip = "127.0.0.1";
@@ -101,31 +103,26 @@ void main(const int argc, const char * const * const argv)
 		port = atoi(argv[2]);
 	}
 
-	WSAData wsadata = { 0, };
 	if (WSAStartup(MAKEWORD(2, 2), &wsadata))
 	{
-		error = WSAGetLastError();
-		ErrorMessage(error);
-		return;
+		ErrorMessage(WSAGetLastError());
+		goto delcs;
 	}
 
 	SOCKET clientSocket = socket(AF_INET, SOCK_STREAM, 0);
 	if (clientSocket == INVALID_SOCKET)
 	{
-		error = WSAGetLastError();
-		ErrorMessage(error);
-		return;
+		ErrorMessage(WSAGetLastError());
+		goto wsaclean;
 	}
 
-	sockaddr_in serverAddr = { 0, };
 	serverAddr.sin_family = PF_INET;
 	serverAddr.sin_addr.s_addr = inet_addr(ip);
 	serverAddr.sin_port = htons(port);
 	if (connect(clientSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
 	{
-		error = WSAGetLastError();
-		ErrorMessage(error);
-		return;
+		ErrorMessage(WSAGetLastError());
+		goto closesock;
 	}
 
 	char len;
@@ -144,19 +141,24 @@ void main(const int argc, const char * const * const argv)
 
 	ChangeNickname(nickname);
 
-	std::thread sendthread(SendThread, clientSocket);
-	std::thread recvthread(RecvThread, clientSocket);
+	{
+		std::thread sendthread(SendThread, clientSocket);
+		std::thread recvthread(RecvThread, clientSocket);
 
-	sendthread.join();
-	recvthread.join();
+		sendthread.join();
+		recvthread.join();
+	}
 
 	for (int i = 0; i < chatLogNum; ++i)
 		delete[] chatLog[i];
 
+closesock:
 	closesocket(clientSocket);
 
+wsaclean:
 	WSACleanup();
 
+delcs:
 	DeleteCriticalSection(&globalCriticalSection);
 }
 
