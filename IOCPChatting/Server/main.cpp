@@ -12,213 +12,28 @@
 #include <memory>
 #include <vector>
 
+
+#include "Lock.h"
+#include "QueueBuffer.h"
+
+#include "IOContext.h"
+
+#include "Global.h"
+
+#include "ClientManager.h"
+#include "Client.h"
+
 #define THREAD_NUM 2
-#define BUF_SIZE 256
-#define NICK_LEN 32
 
 // #define TEST
+
+extern CRITICAL_SECTION globalCriticalSection;
 
 char* g_Manual[] = {
 	"  %help - Show this page",
 	"  %cn ~ - Change Nickname to ~",
 	"  %ls   - List users",
 };
-
-/*
-	Lock
-*/
-
-CRITICAL_SECTION globalCriticalSection;
-
-struct Lock
-{
-	Lock() { EnterCriticalSection(&globalCriticalSection); }
-	~Lock() { LeaveCriticalSection(&globalCriticalSection); }
-};
-
-/*
-	IO Context
-*/
-
-struct IOContext
-{
-	IOContext()
-		:buf(nullptr), recv(false)
-	{
-		ZeroMemory(&overlapped, sizeof(WSAOVERLAPPED));
-	}
-
-	~IOContext()
-	{
-		if (buf)
-			delete[] buf;
-	}
-
-	WSAOVERLAPPED overlapped;
-	char* buf;
-	bool recv;
-
-};
-
-/*
-	Send & Recv Wrapper
-*/
-
-void Send(const SOCKET s, char* const buf, const int len);
-void Recv(const SOCKET s);
-
-/*
-	PC Queue
-*/
-
-template <int size>
-class PCQueue
-{
-public:
-	PCQueue()
-		:itemSize(0)
-	{
-	}
-	~PCQueue()
-	{
-	}
-
-	void Produce(char* const buf, const int len)
-	{
-		Lock _lock;
-		int remainSize = size - itemSize;
-		if (remainSize >= len)
-		{
-			memcpy_s(buffer + itemSize, remainSize, buf, len);
-			itemSize += len;
-		}
-	}
-
-	void Consume(char* const buf, const int len)
-	{
-		Lock _lock;
-		if (itemSize >= len)
-		{
-			memcpy_s(buf, len, buffer, len);
-			memmove_s(buffer, size, buffer + len, itemSize - len);
-			itemSize -= len;
-		}
-	}
-
-	void Peek(char* const buf, const int len)
-	{
-		if (itemSize >= len)
-		{
-			memcpy_s(buf, len, buffer, len);
-		}
-	}
-
-	int GetItemSize() const
-	{
-		Lock _lock;
-		return itemSize;
-	}
-
-private:
-	char buffer[size];
-	int itemSize;
-};
-
-/*
-	Client & Manager
-*/
-
-struct Client
-{
-	Client() :sock(INVALID_SOCKET), entered(false)
-	{
-		strcpy_s(nickname, "Nonamed");
-	}
-
-	Client(SOCKET s) :sock(s), entered(false)
-	{
-		strcpy_s(nickname, "Nonamed");
-	}
-
-	SOCKET sock;
-	char nickname[NICK_LEN];
-	PCQueue<BUF_SIZE> queue;
-	bool entered;
-};
-
-class ClientManager
-{
-public:
-	static ClientManager& GetInstance()
-	{
-		static ClientManager instance;
-		return instance;
-	}
-
-	~ClientManager()
-	{
-		CloseAllClients();
-	}
-
-	void AddClient(Client* const client)
-	{
-		if (!client) return;
-		Lock _lock;
-		clientSocketVec.push_back(client);
-	}
-
-	void CloseClient(Client* const client)
-	{
-		if (!client) return;
-		Lock _lock;
-		closesocket(client->sock);
-		clientSocketVec.erase(
-			std::find(clientSocketVec.begin(), clientSocketVec.end(), client));
-		delete client;
-	}
-	
-	void CloseAllClients()
-	{
-		Lock _lock;
-		for (Client* client : clientSocketVec)
-		{
-			closesocket(client->sock);
-			delete client;
-		}
-		clientSocketVec.clear();
-	}
-	
-	void SendAll(char* const buf, const int len)
-	{
-		if (!buf || len < 1) return;
-		Lock _lock;
-		for (Client* client : clientSocketVec)
-		{
-			if (!client->entered) continue;
-			char l = len;
-			Send(client->sock, &l, 1);
-			Send(client->sock, buf, len);
-		}
-	}
-
-	std::vector<char*> ListNickname()
-	{
-		std::vector<char*> out;
-		for (Client* client : clientSocketVec)
-		{
-			if (!client->entered) continue;
-			out.push_back(client->nickname);
-		}
-		return out;
-	}
-
-private:
-	std::vector<Client*> clientSocketVec;
-
-};
-
-void ErrorLog(const int errorCode);
-void Log(char* const str);
 
 void IOCPThread(HANDLE hCP);
 
@@ -228,18 +43,20 @@ void IOCPThread(HANDLE hCP);
 
 void main(const int argc, const char * const * const argv)
 {
-	int error;
 	unsigned short port;
+
 	std::unique_ptr<std::thread> threads[THREAD_NUM];
 
-	InitializeCriticalSection(&globalCriticalSection);
+	WSAData wsadata = { 0, };
+	sockaddr_in serverAddr = { 0, };
 
+	InitializeCriticalSection(&globalCriticalSection);
 
 	if (argc != 2)
 	{
 #ifndef TEST
 		printf("USAGE : %s <PORT>", argv[0]);
-		return;
+		goto delcs;
 #else
 		port = 12345;
 #endif
@@ -251,15 +68,19 @@ void main(const int argc, const char * const * const argv)
 
 	Log("Starting the server...");
 
-	WSAData wsadata = { 0, };
 	if (WSAStartup(MAKEWORD(2, 2), &wsadata))
 	{
-		error = WSAGetLastError();
-		ErrorLog(error);
-		return;
+		ErrorLog(WSAGetLastError());
+		goto delcs;
 	}
 
 	HANDLE hCP = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, THREAD_NUM);
+	if (hCP == NULL)
+	{
+		ErrorLog(WSAGetLastError());
+		goto wsaclean;
+	}
+
 	for (int i = 0; i < THREAD_NUM; ++i)
 	{
 		threads[i].reset(new std::thread(IOCPThread, hCP));
@@ -268,35 +89,30 @@ void main(const int argc, const char * const * const argv)
 	SOCKET listenSocket = WSASocket(AF_INET, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_OVERLAPPED);
 	if (listenSocket == INVALID_SOCKET)
 	{
-		error = WSAGetLastError();
-		ErrorLog(error);
-		return;
+		ErrorLog(WSAGetLastError());
+		goto closecp;
 	}
 
 	char option = 1;
 	if (setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option)) == SOCKET_ERROR)
 	{
-		error = WSAGetLastError();
-		ErrorLog(error);
-		return;
+		ErrorLog(WSAGetLastError());
+		goto closesock;
 	}
 
-	sockaddr_in serverAddr = { 0, };
 	serverAddr.sin_family = PF_INET;
 	serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	serverAddr.sin_port = htons(port);
 	if (bind(listenSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
 	{
-		error = WSAGetLastError();
-		ErrorLog(error);
-		return;
+		ErrorLog(WSAGetLastError());
+		goto closesock;
 	}
 
 	if (listen(listenSocket, SOMAXCONN) == SOCKET_ERROR)
 	{
-		error = WSAGetLastError();
-		ErrorLog(error);
-		return;
+		ErrorLog(WSAGetLastError());
+		goto closesock;
 	}
 
 	Log("Server started.");
@@ -312,8 +128,7 @@ void main(const int argc, const char * const * const argv)
 		SOCKET clientSocket = accept(listenSocket, (sockaddr*)&clientAddr, &addrLen);
 		if (clientSocket == INVALID_SOCKET)
 		{
-			error = WSAGetLastError();
-			ErrorLog(error);
+			ErrorLog(WSAGetLastError());
 			continue;
 		}
 
@@ -323,8 +138,8 @@ void main(const int argc, const char * const * const argv)
 
 		if (CreateIoCompletionPort((HANDLE)clientSocket, hCP, (ULONG_PTR)client, 0) != hCP)
 		{
-			error = GetLastError();
-			ErrorLog(error);
+			ErrorLog(GetLastError());
+			closesocket(clientSocket);
 			continue;
 		}
 
@@ -335,9 +150,16 @@ void main(const int argc, const char * const * const argv)
 		Recv(clientSocket);
 	}
 
-	CloseHandle(hCP);
+closesock:
 	closesocket(listenSocket);
+	
+closecp:
+	CloseHandle(hCP);
+	
+wsaclean:
 	WSACleanup();
+
+delcs:
 	DeleteCriticalSection(&globalCriticalSection);
 
 }
@@ -444,70 +266,5 @@ void IOCPThread(HANDLE hCP)
 		}
 
 		delete context;
-	}
-}
-
-
-void ErrorLog(const int errorCode)
-{
-	Lock _lock;
-	char* buf = nullptr;
-	FormatMessage(
-		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
-		nullptr,
-		errorCode,
-		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-		(LPSTR)&buf,
-		0,
-		nullptr);
-	fputs("ERROR: ", stderr);
-	fputs(buf, stderr);
-}
-
-
-void Log(char* const str)
-{
-	Lock _lock;
-	puts(str);
-}
-
-
-void Send(const SOCKET s, char* const buf, const int len)
-{
-	IOContext* context = new IOContext();
-
-	WSABUF wsa_buf;
-	wsa_buf.buf = buf;
-	wsa_buf.len = len;
-	
-	if (WSASend(s, &wsa_buf, 1, NULL, 0, &context->overlapped, nullptr) == SOCKET_ERROR)
-	{
-		int error = WSAGetLastError();
-		if (error != WSA_IO_PENDING)
-		{
-			ErrorLog(error);
-		}
-	}
-}
-
-void Recv(const SOCKET s)
-{
-	static DWORD flags = 0;
-
-	IOContext* context = new IOContext();
-	context->buf = new char[BUF_SIZE];
-	context->recv = true;
-
-	WSABUF wsa_buf;
-	wsa_buf.buf = context->buf;
-	wsa_buf.len = BUF_SIZE;
-
-	if (WSARecv(s, &wsa_buf, 1, NULL, &flags, &context->overlapped, nullptr) == SOCKET_ERROR)
-	{
-		int error = WSAGetLastError();
-		if (error != WSA_IO_PENDING)
-		{
-			ErrorLog(error);
-		}
 	}
 }
